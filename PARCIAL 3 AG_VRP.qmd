@@ -1,0 +1,462 @@
+---
+title: "AG_VRP Parcial"
+author: "Andres Bonilla, Mauricio Romero, Mariana Lozano"
+format: html
+toc: true
+toc-location: right
+---
+
+## 1. Problema
+
+Para este caso puntual se desea generar unas ruta para entregarle a los clientes un producto, para solucionar esto se hara a traves del algortimo genetico, utilizando el lenguaje de programación R. adicionalmente se implemento un dinamismo al algoritmo variando la tasa de mutación y evitar que disminuya la variedad presente en la soluciones y tambien una reinicialización periodica de la población cada cierto tiempo, dejando a los mejores individuos con el fin de explorar mas espaciós de soluciones y no empiecen a converger tan rapido.
+
+
+## 2. Librerias, datos y parametros
+
+En este caso se usara un excel el cual contiene de información 4 columnas, la primera el nombre de los puntos, es decir bodega y clientes, la segunda la posición en "x", la tercera posición en "y", y la cuarta la demanda.
+
+A continuación se mostraran las librerias a utilizar y los diferentes parametros requeridos para que este algoritmo funcione.
+
+```{r, warning=FALSE, message=FALSE}
+library(readxl)
+library(igraph)
+Datos_Ruteo <- read_excel("Datos Ruteo.xlsx")
+```
+
+Aqui vemos dos librerias `readxl` la cual nos permite exportar directamente documentos de excel como dataframe y `igraph ` que nos permite crear objetos de red y hacer grafos.
+
+```{r}
+reinicializacion_periodica <- TRUE # Indica si se activará la reinicialización periódica
+periodo_reinicializacion <- 100 # cada cuantas generaciones hacerlo
+n <- 32 #numero de ciudades
+dep <- 1 #número de depositos
+dj <- Datos_Ruteo$`Demanda (uds.)`[-1] #demandas eliminando la demanda del deposito.
+Q <- 100 # Capacidad de un vehiculo
+tampo <- 50 # tamaño de población
+m <- 4 #tamaño de muestra
+gen <- 220 # numero de generaciones
+iter <- gen*tampo #número de iteraciones
+tc <- 0.8 #tasa de cruzamiento
+tm <- 0.2 #tasa de mutación
+cambio <- c(0.6,0.8,1,0.1) # cambios en la tasas de mutación
+genera <- gen/4 # etapas donde se modifican las tasas
+```
+
+Estos son los parametros que se deben definir para ejecutar nuestro algoritmo, a partir de estos parametros esta construido todo el codigo.
+
+
+## 3. Funciones.
+ 
+En este apartado se definiran las funciones que que le dan vida al algoritmo. en este caso vamos desde funciones de evaluación para VRP hasta la función de mutación del algoritmo genetico.
+
+### 3.1. Calculo de distancias.
+
+Como en el excel los diferentes clientes y depositos, contienen son coordenadas en el plano cartesiano, es necesario aplicar teorema de pitagoras para extraer las distancias presentes en cada par de puntos, es decir calcular la hipotenusa.
+
+```{r}
+distancias <- matrix(0,nrow = (n+dep),ncol = (n+dep),byrow = T)
+for (i in 1:(n+dep)) {
+  for (j in 1:(n+dep)) {
+    a <- Datos_Ruteo$x[j]-Datos_Ruteo$x[i]
+    b <- Datos_Ruteo$y[j]-Datos_Ruteo$y[i]
+    distancias[i,j] <- sqrt((a^2)+(b^2))  
+  }
+}
+```
+
+Se crea una matriz de distancias vacias, que contenga la cantidad de filas y columnas apropiadas para este problema y por medio de un for vamos calculando la distancia para cada casilla de la matriz.
+
+### 3.2. Función para extraer la ruta y evaluación.
+
+Primero tenemos que definir las rutas en base a la secuencia que contiene el vector de solución. asi que se definira cada ruta en base a la demanda y capacidad del vehiculo, estableciendo las diferentes rutas formadas en base a esa secuencia.
+
+
+```{r}
+rut <- function(x){
+  bodega <- Q
+  ruta <- c(0)
+  for (i in 1:n) {
+    if (bodega>= dj[x[i]]) {
+      ruta <- c(ruta,x[i])
+      bodega <- bodega-dj[x[i]]
+    } else{
+      ruta <- c(ruta,0,x[i])
+      bodega <- Q-dj[x[i]]
+    }
+  }
+  ruta <- c(ruta,0)
+  ruta <- ruta+1
+  return(ruta)
+}
+
+```
+
+Para la función de evaluación simplemento sumamos la distancias que hay entre cada elemento en nuestro vector de soluciones, y el elemento siguiente en el mismo vector.
+
+```{r}
+f.o <- function(x){
+  ruta <- rut(x)
+  distan1 <- 0
+  for (i in 1:(length(ruta)-1)) {
+    distan1[i] <- distancias[ruta[i],ruta[(i+1)]]  
+  }
+  EV <- sum(distan1)
+  return(EV)
+}
+```
+
+
+### 3.3. Generación de población inicial
+
+Se teniendo en cuenta el tamaño de población definido en los parametros y usando la función de `sample()` generaremos individuos aleatorios. Posteriormente se aplicara la función de evaluación a cada inviduo.
+
+
+```{r}
+poblacion = matrix(0, nrow = tampo, ncol = n)
+for (i in 1:tampo) {
+  poblacion[i,] <- sample(1:n, n, replace = F)
+}
+EV = apply(poblacion, 1, f.o)
+
+```
+
+### 3.4. Selección por torneo.
+
+Para la selección por torneo se selecciona una muestra de individuos de los cuales se evalua cual es que presente una mejor evaluación y de esta manera el individuo es seleccionado.
+
+```{r}
+selector <- function(){
+  muestra = sample(1:tampo, m)
+  
+  EV[muestra]
+  
+  mejor <- which.min(EV[muestra])
+  
+  posi <- muestra[mejor]
+  
+  return(poblacion[posi,])
+}
+```
+
+### 3.5. Cruzamiento.
+
+Para el cruzamiento se deben realizar dos cortes y la posición de los cortes sera elegida de manera aleatoria, teniendo en cuenta que los cortes deben tener mínimo un espacio de 1 entre ellos, estos espacios se agregaran a al hijo individuo y ademas se toma la parte restante del otro individuo para terminar de completar al hijo. este proceso se repite para generar otro hijo, solo que el proceso que anteriormente se le aplico al padre ahora se le aplicara a la madre y el de la madre al padre. Finalmente se escoje uno de los hijos al azar.
+
+```{r}
+cruzamiento=function(pa,ma){
+  corte1 <- sample(1:(n-1),1)
+  excluir <- c(corte1-1,corte1,corte1+1)
+  conj <- setdiff(1:(n-1),excluir)
+  corte2 <- sample(conj,1)
+  pc <- c(corte1,corte2)
+  
+  extr_iz1 <- pa[1:min(pc)]
+  extr_dere1 <- pa[-(1:max(pc))]
+  vector_temp1 <- c(extr_iz1,extr_dere1)
+  
+  cont <- 0
+  for(i in 1:n){
+    cont[i] <- sum(ma[i]==vector_temp1)
+    pos1 <- which(cont==0)
+    extr_cent1 <- c(ma[pos1])
+  }
+  
+  hijo1 <- c(extr_iz1,extr_cent1,extr_dere1)
+  
+  extr_iz2 <- ma[1:min(pc)]
+  extr_dere2 <- ma[-(1:max(pc))]
+  vector_temp2 <- c(extr_iz2,extr_dere2)
+  
+  cont <- 0
+  for(i in 1:n){
+    cont[i] <- sum(pa[i]==vector_temp2)
+    pos2 <- which(cont==0)
+    extr_cent2 <- c(pa[pos2])  
+    
+    
+  }
+  hijo2 <- c(extr_iz2,extr_cent2,extr_dere2)
+  if(runif(1)<0.5){
+    hijo_select <- hijo1
+  }else{
+    hijo_select <- hijo2
+  }
+  
+  return(hijo_select)
+}
+```
+
+### 3.6. mutación.
+
+Para la mutación simplemente se intercambia de lugar dos elementos del vector de solucion.
+
+```{r}
+mutacion <- function(hijo){
+  cambio <- sample(1:n,2,replace = F)
+  provi <- hijo[cambio[1]]
+  hijo[cambio[1]] <- hijo[cambio[2]]
+  hijo[cambio[2]] <- provi
+  return(hijo)
+}
+```
+
+
+## 4. Grafica y evaluación de la población inicial.
+
+La población inicial al estar generada de manera aleatoria tiende a tener soluciones poco optimas, sin embargo sirven de punto de partida para utilizar nuestro algoritmo.
+
+```{r}
+EV # Evaluación de todos los individuos de la población inicial
+
+```
+
+### 4.1. Grafo del incumbente de la población inicial.
+
+para poder realizar este grafo se debe construir las conexiones entre los nodos de la ruta, estas estaran representadas en un `dataframe` donde la primera colunma son los nodos de salida y la segunda los nodos de llegada.
+
+Posteriormente se establecen atributos al objeto de red, como lo es las distancias para las aristas y la demanda para los nodos.
+```{r, warning=FALSE, message=FALSE, fig.align='center',fig.height=10, fig.width=10}
+ruta <- rut(poblacion[which.min(EV),])
+enlaces <- matrix(NA, ncol = 2, nrow = length(ruta) - 1)
+for (i in 1:(length(ruta) - 1)) {
+  enlaces[i, ] <- c(ruta[i], ruta[i + 1])
+}
+
+dis <- c(0)
+for (i in 1:length(enlaces[,1])) {
+  dis[i] <- distancias[enlaces[i,1],enlaces[i,2]] 
+}
+contador <- 1
+grupo <- c()
+for (i in 1:length(enlaces[,1])) {
+  grupo <- c(grupo,contador)
+  if (as.vector(enlaces[,2])[i]==1) {
+    contador = contador + 1 
+  }
+  
+}
+numeros_unicos <- unique(grupo)
+
+# Generar una paleta de colores basada en el número de números únicos
+paleta_colores <- rainbow(length(numeros_unicos))
+
+# Crear un vector de colores asignando un color a cada número único
+colores <- paleta_colores[match(grupo, numeros_unicos)]
+enlaces <- cbind(from = enlaces[,1],to = enlaces[,2],grupo, colores,dis = trunc(dis))
+
+red <- graph_from_data_frame(enlaces, directed = FALSE)
+V(red)$demanda <- Datos_Ruteo$`Demanda (uds.)`
+coordenadas <- cbind(Datos_Ruteo$x[unique(ruta)],Datos_Ruteo$y[unique(ruta)])
+plot(red,edge.label = E(red)$dis,layout = coordenadas,
+     vertex.size = 9, vertex.label.cex = 0.8, edge.label.cex = 0.8,
+     edge.color = E(red)$colores)
+```
+
+
+## 5. Algoritmo iterativo.
+
+Para mejorar la solución se optó por dos extrategias puntuales:
+
+1. mayor agresividad en la mutación:
+  
+En el primero se busca fomentar la varianza de la población haciendo mas grande la tasa de mutación cada numero de generaciones establecidos.
+
+2. reiniciar la población.:
+
+Para evitar converger en optimos locales aplicamos esta estrategias, cambiando una parte de población, asegurando los mejores individuos de esa generación, se busca explorar otro espacio de solución, y salir de ese optimo local, si se tiene suerte hacer esto consigue dar con mejores soluciones.
+
+al principio tambien se establecen unas variables globales que se utilizaran para reiniciar la población y la otra para almacenar el incumbente de cada generación. tambien se usa la función `proc.time()` que nos proporcional los tiempos de procesamiento de pc.
+
+
+```{r, warning=FALSE, message=FALSE}
+t <- proc.time() # evaluar el tiempo de procesamiento antes de aplicar el algoritmo
+x <- 0 # donde se almacenara el incumbente por generación
+generacion_actual <- 1 # definira en que generación se encuentra el algoritmo
+
+for (i in 1:iter) {
+  pa <- selector()
+  ma <- selector()
+  
+  if(runif(1)<=tc){
+    hijo_select <- cruzamiento(pa,ma)
+  }else{
+    hijo_1 <- pa
+    hijo_2 <- ma
+    if (runif(1)<=0.5) {
+      hijo_select <- hijo_1
+    }else{
+      hijo_select <- hijo_2
+    }
+  }
+  
+  
+  #Mutacion
+  if(runif(1)<=tm){
+    hijo_mutado <- mutacion(hijo_select)
+  }else{
+    hijo_mutado <- hijo_select
+  }
+  
+  #Ingreso del hijo a la población
+  existe = 0
+  total=matrix(0,nrow = tampo,ncol = n)
+  for (k in 1:tampo) {
+    total[k,]=abs(hijo_mutado-poblacion[k,])
+    if(sum(total[k,])==0){
+      existe=1
+      break
+    }
+  }
+  
+  if(existe==0 & f.o(hijo_mutado)<max(EV)){
+    pos_reem <- which.max(EV)
+    poblacion[pos_reem,]=hijo_mutado
+    EV[pos_reem]=f.o(hijo_mutado)
+  }
+  
+  if(i%%tampo==0){
+    x[i/tampo] <- min(EV)
+  }
+
+  if (i%%(genera*tampo)==0) {
+    tm <- cambio[(i/(genera*tampo))]
+  }
+  
+  if (reinicializacion_periodica && generacion_actual %% periodo_reinicializacion == 0) {
+    cambio <- order(EV,decreasing = T)[1:(tampo-3)]
+    for (i in 1:length(cambio)) {
+      poblacion[cambio[i],] <- sample(1:n, n, replace = F)
+    }
+    EV = apply(poblacion, 1, f.o)
+  }
+  
+  generacion_actual <- generacion_actual + 1
+}
+proc.time() - t
+
+```
+
+
+### 5.1 Soluciones.
+
+Como podemos observar el algoritmo tarda en promedio 5 segundos en ser procesado y nos arroja el siguiente incumbente.
+
+```{r}
+min(EV) 
+#El mejor individuo:
+rut(poblacion[which.min(EV),])
+```
+
+A continuación un gráfica que muestra el como mejoran las soluciones por cada generación.
+
+```{r,warning=FALSE, message=FALSE, fig.align='center'}
+plot(x, main = "Gráfico del incumbente", xlab = "Generación",
+     ylab = "Incumbente")
+
+```
+
+muchas veces para llegar a mejor tener soluciones dependemos de la calidad de soluciones de la población inicial, si bien nuestras estrategias ayudan a mejorar las soluciones en la mayoria de los casos, no siempre logran ser completamente preciso.
+
+
+### 5.2 Grafo de la solución
+
+```{r, r, warning=FALSE, message=FALSE, fig.align='center',fig.height=10, fig.width=10,echo=FALSE}
+ruta <- rut(poblacion[which.min(EV),])
+enlaces <- matrix(NA, ncol = 2, nrow = length(ruta) - 1)
+for (i in 1:(length(ruta) - 1)) {
+  enlaces[i, ] <- c(ruta[i], ruta[i + 1])
+}
+
+dis <- c(0)
+for (i in 1:length(enlaces[,1])) {
+  dis[i] <- distancias[enlaces[i,1],enlaces[i,2]] 
+}
+contador <- 1
+grupo <- c()
+for (i in 1:length(enlaces[,1])) {
+  grupo <- c(grupo,contador)
+  if (as.vector(enlaces[,2])[i]==1) {
+    contador = contador + 1 
+  }
+  
+}
+numeros_unicos <- unique(grupo)
+
+# Generar una paleta de colores basada en el número de números únicos
+paleta_colores <- rainbow(length(numeros_unicos))
+
+# Crear un vector de colores asignando un color a cada número único
+colores <- paleta_colores[match(grupo, numeros_unicos)]
+enlaces <- cbind(from = enlaces[,1],to = enlaces[,2],grupo, colores,dis = trunc(dis))
+
+red <- graph_from_data_frame(enlaces, directed = FALSE)
+V(red)$demanda <- Datos_Ruteo$`Demanda (uds.)`
+coordenadas <- cbind(Datos_Ruteo$x[unique(ruta)],Datos_Ruteo$y[unique(ruta)])
+plot(red,edge.label = E(red)$dis,layout = coordenadas,
+     vertex.size = 9, vertex.label.cex = 0.8, edge.label.cex = 0.8,edge.color = E(red)$colores)
+
+```
+
+
+### 5.3 Mejor solución.
+
+Utilizando esta estrategia se ha logrado conseguir la siguiente solución que minimiza significativamente la solución.
+
+```{r}
+solucion <- c(4,8,2,13,17,7,29,27,31,1,21,28,25,15,14,22,32,20,18,3,24,19,30,6,26,11,
+              16,23,10,12,9,5)
+ruta <- rut(solucion)
+ruta # rutas formadas
+f.o(solucion)# valor de la función objetivo para esta solución
+```
+
+para esta solución conseguimos la siguiente red de la ruta:
+
+```{r, warning=FALSE, message=FALSE, fig.align='center',fig.height=10, fig.width=10,echo=FALSE}
+enlaces <- matrix(NA, ncol = 2, nrow = length(ruta) - 1)
+for (i in 1:(length(ruta) - 1)) {
+  enlaces[i, ] <- c(ruta[i], ruta[i + 1])
+}
+
+dis <- c(0)
+for (i in 1:length(enlaces[,1])) {
+  dis[i] <- distancias[enlaces[i,1],enlaces[i,2]] 
+}
+contador <- 1
+grupo <- c()
+for (i in 1:length(enlaces[,1])) {
+  grupo <- c(grupo,contador)
+  if (as.vector(enlaces[,2])[i]==1) {
+    contador = contador + 1 
+  }
+  
+}
+numeros_unicos <- unique(grupo)
+
+# Generar una paleta de colores basada en el número de números únicos
+paleta_colores <- rainbow(length(numeros_unicos))
+
+# Crear un vector de colores asignando un color a cada número único
+colores <- paleta_colores[match(grupo, numeros_unicos)]
+enlaces <- cbind(from = enlaces[,1],to = enlaces[,2],grupo, colores,dis = trunc(dis))
+
+red <- graph_from_data_frame(enlaces, directed = FALSE)
+V(red)$demanda <- Datos_Ruteo$`Demanda (uds.)`
+
+coordenadas <- cbind(Datos_Ruteo$x[unique(ruta)],Datos_Ruteo$y[unique(ruta)])
+plot(red,edge.label = E(red)$dis,layout = coordenadas,
+     vertex.size = 9, vertex.label.cex = 0.8, edge.label.cex = 0.8,
+     edge.color = E(red)$colores)
+
+
+
+```
+
+#### 5.3.1 gráfico de la mejor solución sin aplicar coordenadas
+
+```{r, warning=FALSE, message=FALSE, fig.align='center',fig.height=10, fig.width=10,echo=FALSE}
+plot(red,edge.label = E(red)$dis,
+     vertex.size = 9, vertex.label.cex = 0.8, edge.label.cex = 0.8,
+     edge.color = E(red)$colores)
+```
+
